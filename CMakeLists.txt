@@ -1,8 +1,10 @@
-cmake_minimum_required(VERSION 3.20)
-project(quant_cpp LANGUAGES C CXX)
+cmake_minimum_required(VERSION 3.10)
 
-set(CMAKE_CXX_STANDARD 20)
+project(QuantCpp)
+
+set(CMAKE_CXX_STANDARD 17)  # C++17 표준 사용
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_executable(week1 main.cpp)
+include_directories(${CMAKE_SOURCE_DIR})  # 기본 경로 추가
+
+add_executable(main main.cpp)

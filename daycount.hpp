@@ -1,19 +1,27 @@
-#pragma once
-#include "date.hpp"
-#include <stdexcept>
+#ifndef DAYCOUNT_HPP
+#define DAYCOUNT_HPP
 
-enum class DayCount {
-    Act365F,
-    Act360
+#include "date.hpp"
+
+enum class DayCountConvention {
+    ACT_365F,
+    ACT_360
 };
 
-inline double year_fraction(const Date& start, const Date& end, DayCount dc) {
-    const int days = date_util::days_between(start, end);
-    if (days < 0) throw std::runtime_error("year_fraction: end < start");
-
-    switch (dc) {
-        case DayCount::Act365F: return static_cast<double>(days) / 365.0;
-        case DayCount::Act360:  return static_cast<double>(days) / 360.0;
-        default: throw std::runtime_error("year_fraction: unsupported DayCount");
+class DayCount {
+public:
+    static double calculate(DayCountConvention convention, const Date& start, const Date& end) {
+        int days = Date::daysBetween(start, end);
+        
+        switch (convention) {
+            case DayCountConvention::ACT_365F:
+                return days / 365.0;
+            case DayCountConvention::ACT_360:
+                return days / 360.0;
+            default:
+                return 0.0;
+        }
     }
-}
+};
+
+#endif // DAYCOUNT_HPP

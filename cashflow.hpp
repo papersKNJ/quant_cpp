@@ -1,7 +1,14 @@
-#pragma once
-#include "date.hpp"
+#ifndef CASHFLOW_HPP
+#define CASHFLOW_HPP
+
+#include <vector>  // vector 헤더 파일 추가
+#include "date.hpp"  // Date 헤더 파일 추가
 
 struct Cashflow {
-    Date pay_date{};
-    double amount{0.0};
+    double amount;
+    Date date;
+
+    Cashflow(double amt, const Date& dt) : amount(amt), date(dt) {}
 };
+
+#endif // CASHFLOW_HPP

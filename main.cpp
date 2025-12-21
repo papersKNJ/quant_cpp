@@ -1,58 +1,24 @@
-#include <iostream>
-#include <iomanip>
-
 #include "date.hpp"
 #include "daycount.hpp"
 #include "cashflow.hpp"
-
-// Week1: simple discounting DF = 1 / (1 + r*T)
-static double df_simple(double r, double T) {
-    return 1.0 / (1.0 + r * T);
-}
-
-static double pv_zcb_simple(const Cashflow& cf, const Date& asof, double r, DayCount dc) {
-    const double T = year_fraction(asof, cf.pay_date, dc);
-    return cf.amount * df_simple(r, T);
-}
-
-static double pv01_zcb_simple(const Cashflow& cf, const Date& asof, double r, DayCount dc) {
-    // 1bp bump (0.0001), engine re-call (desk style)
-    const double bump = 1e-4;
-    const double pv0 = pv_zcb_simple(cf, asof, r, dc);
-    const double pv1 = pv_zcb_simple(cf, asof, r + bump, dc);
-    return pv1 - pv0;
-}
-
-static void run_one(DayCount dc, const char* label, const Date& asof, const Cashflow& zcb, double r) {
-    const double T = year_fraction(asof, zcb.pay_date, dc);
-    const double pv = pv_zcb_simple(zcb, asof, r, dc);
-    const double pv01 = pv01_zcb_simple(zcb, asof, r, dc);
-
-    std::cout << "== " << label << " ==\n";
-    std::cout << std::setprecision(6) << std::fixed;
-    std::cout << "T (approx)        = " << T << "\n";
-
-    std::cout << std::setprecision(4) << std::fixed;
-    std::cout << "ZCB PV (simple)   = " << pv << "\n";
-
-    std::cout << std::setprecision(8) << std::fixed;
-    std::cout << "PV01 (1bp, approx)= " << pv01 << "\n\n";
-}
+#include "eom.hpp"
 
 int main() {
-    // Week1 calibration to match known output:
-    // asof=2021-07-29, pay=2022-07-29 => 365 days
-    const Date asof{2021, 7, 29};
-    const Cashflow zcb{ Date{2022, 7, 29}, 100.0 };
-    const double r = 0.05;
+    // 예시 날짜 설정
+    Date startDate(1, 1, 2022);
+    Date endDate(1, 1, 2023);
 
-    run_one(DayCount::Act365F, "ACT/365F", asof, zcb, r);
-    run_one(DayCount::Act360,  "ACT/360",  asof, zcb, r);
+    // Day Count 계산
+    double dayCount365F = DayCount::calculate(DayCountConvention::ACT_365F, startDate, endDate);
+    double dayCount360 = DayCount::calculate(DayCountConvention::ACT_360, startDate, endDate);
 
-    // EOM/말영업일 유틸은 Week1 pricing에서 호출하지 않는다 (의도된 설계).
-    // 필요 시 검증용으로만 아래처럼 확인 가능:
-    // Date eobm = calendar_util::last_business_day_of_month(2022, 7);
-    // std::cout << "Last business day 2022-07 = " << eobm.y << "-" << eobm.m << "-" << eobm.d << "\n";
+    std::cout << "Day Count (ACT/365F): " << dayCount365F << std::endl;
+    std::cout << "Day Count (ACT/360): " << dayCount360 << std::endl;
+
+    // EOM 처리 예시
+    Date lastBusinessDay = EOM::getLastBusinessDayOfMonth(2022, 7);
+    std::cout << "Last Business Day of July 2022: ";
+    lastBusinessDay.print();
 
     return 0;
 }
