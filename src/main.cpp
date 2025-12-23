@@ -161,7 +161,8 @@ static std::vector<CouponPeriod> buildSchedule(
     const WeekendCalendar& cal
 ) {
     int totalMonths = (maturity.y - issue.y) * 12 + (maturity.m - issue.m);
-    size_t expectedPeriods = static_cast<size_t>(std::max(1, totalMonths / tenor_months + 2));
+    int roughPeriods = (totalMonths + tenor_months - 1) / tenor_months + 2;
+    size_t expectedPeriods = static_cast<size_t>(std::max(1, roughPeriods));
 
     std::vector<Date> dates;
     dates.reserve(expectedPeriods + 1);
@@ -194,11 +195,12 @@ static std::vector<CouponPeriod> buildSchedule(
 
 // ============================================================
 // 5) DF Curve: log-linear interpolation on DF
+//    - 최소 diff: dfFrom을 lnDF 차로 계산 (ratio 대신)
 // ============================================================
 class DFCurve {
 public:
-    DFCurve(std::vector<double> times, std::vector<double> dfs)
-        : t_(std::move(times)) {
+    DFCurve(const Date& origin, std::vector<double> times, std::vector<double> dfs)
+        : origin_(origin), t_(std::move(times)) {
         if (t_.size() < 2 || t_.size() != dfs.size()) throw std::runtime_error("DFCurve: invalid sizes");
         ln_df_.reserve(dfs.size());
 
@@ -210,66 +212,78 @@ public:
         }
     }
 
-    static DFCurve fromZeroCC(const std::vector<double>& pillars, const std::vector<double>& zero_cc) {
+    static DFCurve fromZeroCC(const Date& origin,
+                              const std::vector<double>& pillars,
+                              const std::vector<double>& zero_cc) {
         if (pillars.size() != zero_cc.size()) throw std::runtime_error("fromZeroCC size mismatch");
         std::vector<double> dfs;
         dfs.reserve(pillars.size());
         for (size_t i = 0; i < pillars.size(); ++i) dfs.push_back(std::exp(-zero_cc[i] * pillars[i]));
-        return DFCurve(std::vector<double>(pillars.begin(), pillars.end()), std::move(dfs));
+        return DFCurve(origin, std::vector<double>(pillars.begin(), pillars.end()), std::move(dfs));
     }
 
     double df(double t) const {
         if (t <= 0.0) return 1.0;
 
         if (t <= t_.front()) {
-            return interpolate(t, 0, 1);
+            return interpolateDF(t, 0, 1);
         }
         if (t >= t_.back()) {
             size_t n = t_.size();
-            return interpolate(t, n - 2, n - 1);
+            return interpolateDF(t, n - 2, n - 1);
         }
 
-        size_t idx = locateIndex(t);
-        return interpolate(t, idx - 1, idx);
+        auto it = std::upper_bound(t_.begin(), t_.end(), t);
+        size_t idx = static_cast<size_t>(it - t_.begin());
+        return interpolateDF(t, idx - 1, idx);
+    }
+
+    double dfTo(const Date& dt) const {
+        double t = act360(origin_, dt);
+        return df(t);
+    }
+
+    // NEW: lnDF를 직접 사용해서 ratio를 exp(ln_to - ln_from)로 계산
+    double dfFrom(const Date& from, const Date& to) const {
+        double ln_from = lnDfTo(from);
+        double ln_to   = lnDfTo(to);
+        return std::exp(ln_to - ln_from);
     }
 
 private:
-    double interpolate(double t, size_t i0, size_t i1) const {
+    double interpolateLnDF(double t, size_t i0, size_t i1) const {
         double t0 = t_[i0], t1 = t_[i1];
         double y0 = ln_df_[i0], y1 = ln_df_[i1];
         double w = (t - t0) / (t1 - t0);
-        return std::exp(y0 + w * (y1 - y0));
+        return (y0 + w * (y1 - y0));
     }
 
-    size_t locateIndex(double t) const {
-        if (last_idx_ > 0 && last_idx_ < t_.size()) {
-            if (t > t_[last_idx_ - 1] && t <= t_[last_idx_]) {
-                return last_idx_;
-            }
-            if (last_idx_ + 1 < t_.size() && t > t_[last_idx_] && t <= t_[last_idx_ + 1]) {
-                ++last_idx_;
-                return last_idx_;
-            }
-            if (last_idx_ > 1 && t > t_[last_idx_ - 2] && t <= t_[last_idx_ - 1]) {
-                --last_idx_;
-                return last_idx_;
-            }
+    double interpolateDF(double t, size_t i0, size_t i1) const {
+        return std::exp(interpolateLnDF(t, i0, i1));
+    }
+
+    double lnDf(double t) const {
+        if (t <= 0.0) return 0.0; // ln(1)=0
+
+        if (t <= t_.front()) return interpolateLnDF(t, 0, 1);
+        if (t >= t_.back())  {
+            size_t n = t_.size();
+            return interpolateLnDF(t, n - 2, n - 1);
         }
         auto it = std::upper_bound(t_.begin(), t_.end(), t);
-        last_idx_ = static_cast<size_t>(it - t_.begin());
-        return last_idx_;
+        size_t idx = static_cast<size_t>(it - t_.begin());
+        return interpolateLnDF(t, idx - 1, idx);
     }
 
+    double lnDfTo(const Date& dt) const {
+        double t = act360(origin_, dt);
+        return lnDf(t);
+    }
+
+    Date origin_;
     std::vector<double> t_;
     std::vector<double> ln_df_;
-    mutable size_t last_idx_{1};
 };
-
-static double fwdSimpleRate(const DFCurve& fwdCurve, double t0, double t1, double accrual) {
-    double df0 = fwdCurve.df(t0);
-    double df1 = fwdCurve.df(t1);
-    return (df0 / df1 - 1.0) / accrual;
-}
 
 // ============================================================
 // 6) Fixing store (sorted vector)
@@ -294,13 +308,23 @@ public:
     }
 
     bool has(const Date& reset) const {
-        return find(reset) != data_.end();
+        double rate = 0.0;
+        return tryGet(reset, rate);
     }
 
     double get(const Date& reset) const {
+        double rate = 0.0;
+        if (!tryGet(reset, rate)) {
+            throw std::runtime_error("Fixing missing for reset date");
+        }
+        return rate;
+    }
+
+    bool tryGet(const Date& reset, double& out) const {
         auto it = find(reset);
-        if (it == data_.end()) throw std::runtime_error("Fixing missing for reset date");
-        return it->second;
+        if (it == data_.end()) return false;
+        out = it->second;
+        return true;
     }
 
 private:
@@ -320,7 +344,18 @@ private:
 };
 
 // ============================================================
+// NEW (diff #2): origin 기준 start/end forward를 함수로 고정
+// ============================================================
+static double forwardSimpleFromCurve(const DFCurve& fwd, const Date& start, const Date& end, double accrual) {
+    // 1 + L*alpha = DF(start)/DF(end) (origin 기준 term structure에서 start/end forward)
+    double df_start = fwd.dfTo(start);
+    double df_end   = fwd.dfTo(end);
+    return (df_start / df_end - 1.0) / accrual;
+}
+
+// ============================================================
 // 7) FRN pricer
+//    - diff #1: current fixing 1회 조회 후 캐시
 // ============================================================
 struct FRNResult {
     double dirty{0.0};
@@ -341,35 +376,46 @@ static FRNResult priceFRN(
     FRNResult res{};
     if (periods.empty()) return res;
 
+    int currentIdx = -1;
+    double currentFixingRate = 0.0; // cache
+
+    for (size_t i = 0; i < periods.size(); ++i) {
+        const auto& p = periods[i];
+        if (!(valDate < p.start) && (valDate < p.end)) {
+            currentIdx = static_cast<int>(i);
+
+            // cache fixing once
+            currentFixingRate = fixings.get(p.reset);
+
+            double accr = act360(p.start, valDate);
+            if (accr < 0.0) accr = 0.0;
+            if (accr > p.accrual) accr = p.accrual;
+            res.accrued = notional * (currentFixingRate + spread) * accr;
+            break;
+        }
+    }
+
     for (size_t i = 0; i < periods.size(); ++i) {
         const auto& p = periods[i];
 
         bool payAfterVal = includePayOnValDate ? !(p.pay < valDate) : (valDate < p.pay);
         if (!payAfterVal) continue;
 
-        double t_pay = act360(valDate, p.pay);
-        double df_pay = disc.df(t_pay);
+        double df_pay = disc.dfFrom(valDate, p.pay);
 
         double rate = 0.0;
-        bool inCurrent = (!(valDate < p.start) && (valDate < p.end));
+        bool inCurrent = (static_cast<int>(i) == currentIdx);
 
         if (inCurrent) {
-            rate = fixings.get(p.reset);
-            double accr = act360(p.start, valDate);
-            if (accr < 0.0) accr = 0.0;
-            if (accr > p.accrual) accr = p.accrual;
-            res.accrued = notional * (rate + spread) * accr;
+            rate = currentFixingRate; // reuse cached
         } else if (valDate < p.start) {
-            double t0 = act360(valDate, p.start);
-            double t1 = act360(valDate, p.end);
-            rate = fwdSimpleRate(fwd, t0, t1, p.accrual);
+            rate = forwardSimpleFromCurve(fwd, p.start, p.end, p.accrual);
         } else {
-            if (fixings.has(p.reset)) {
-                rate = fixings.get(p.reset);
+            double fixingRate = 0.0;
+            if (fixings.tryGet(p.reset, fixingRate)) {
+                rate = fixingRate;
             } else {
-                double t0 = act360(valDate, p.start);
-                double t1 = act360(valDate, p.end);
-                rate = fwdSimpleRate(fwd, t0, t1, p.accrual);
+                rate = forwardSimpleFromCurve(fwd, p.start, p.end, p.accrual);
             }
         }
 
@@ -410,10 +456,10 @@ int main() {
     const std::vector<double> pillars = {0.25, 0.5, 1.0, 2.0, 3.0, 5.0};
 
     const std::vector<double> z_disc = {0.030, 0.031, 0.032, 0.033, 0.0335, 0.034};
-    DFCurve disc = DFCurve::fromZeroCC(pillars, z_disc);
+    DFCurve disc = DFCurve::fromZeroCC(issue, pillars, z_disc);
 
     const std::vector<double> z_fwd = {0.032, 0.033, 0.034, 0.035, 0.0355, 0.036};
-    DFCurve fwd = DFCurve::fromZeroCC(pillars, z_fwd);
+    DFCurve fwd = DFCurve::fromZeroCC(issue, pillars, z_fwd);
 
     FixingStore fixings;
     for (const auto& p : periods) {
